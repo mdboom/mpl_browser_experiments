@@ -22,7 +22,7 @@ window.onload = function() {
     }
     var message = document.getElementById("message");
 
-    control_ws = new WebSocket("ws://localhost:8888/event");
+    control_ws = new WebSocket("ws://" + document.location.host + "/event");
     control_ws.onmessage = function (evt) {
         var msg = JSON.parse(evt.data);
         message.textContent = msg[0];
@@ -35,7 +35,7 @@ window.onload = function() {
         context.drawImage(imageObj, 0, 0);
     };
 
-    var image_ws = new WebSocket("ws://localhost:8888/image");
+    var image_ws = new WebSocket("ws://" + document.location.host + "/image");
     image_ws.parts = []
     image_ws.onopen = function() {image_ws.send(1)};
     image_ws.onmessage = function (evt) {
