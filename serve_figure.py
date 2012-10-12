@@ -14,7 +14,6 @@ from matplotlib import _png
 from matplotlib import backend_bases
 
 import cStringIO
-png_buffer = cStringIO.StringIO()
 
 if [int(x) for x in matplotlib.__version__.split('.')[:2]] >= [1, 2]:
     def get_buffer(ren):
@@ -45,7 +44,8 @@ class IndexPage(tornado.web.RequestHandler):
         self.write(html)
 
 
-image_socket = None
+image_sockets = set()
+
 def serve_figure(fig, port=8888):
     # The panning and zooming is handled by the toolbar, (strange enough),
     # so we need to create a dummy one.
@@ -58,8 +58,6 @@ def serve_figure(fig, port=8888):
             self.message = message
 
         def dynamic_update(self):
-            if self.needs_draw is False:
-                Image.image_number += 1
             self.needs_draw = True
 
     toolbar = Toolbar(fig.canvas)
@@ -67,90 +65,68 @@ def serve_figure(fig, port=8888):
     # Set pan mode -- it's the most interesting one
     toolbar.pan()
 
-    def RateLimited(maxPerSecond):
-        "Based on http://stackoverflow.com/a/667706/1200039"
-        min_time = 1.0 / float(maxPerSecond)
-        def decorate(func):
-            # these are lists so we can modify them below
-            # sort of a poor-man's nonlocal keyword
-            timeout = [0.0]
-            pending = [False]
-            def rateLimitedFunction(*args,**kwargs):
-                # called with no pending calls: run function
-                # called with with pending call: do nothing
-                # called with no pending calls, but within the window of the last call: set timeout for pending call
-                curr_time = time.time()
-                if pending[0]:
-                    return
-                else:
-                    def ff():
-                        timeout[0] = time.time() + min_time
-                        ret = func(*args, **kwargs)
-                        pending[0] = False
-                        return ret
+    class DiffBuffer:
+        def __init__(self):
+            self.last_buffer = None
+            self.png_buffer = cStringIO.StringIO()
 
-                    ioloop = tornado.ioloop.IOLoop.instance()
-                    pending[0] = ioloop.add_timeout(datetime.timedelta(seconds=max(0, timeout[0] - curr_time)), ff)
-            return rateLimitedFunction
-        return decorate
-
-    class Image(tornado.websocket.WebSocketHandler):
-        last_buffer = None
-        image_number = 0
-        def open(self):
-            global image_socket
-            image_socket = self
-            self.init=True
-
-        def on_message(self, message):
-            self.refresh()
-
-        def close(self):
-            global image_socket
-            self.init = False
-            image_socket = None
-
-        @RateLimited(5)
-        def refresh(self):
-            if not self.init: return
-            if fig.canvas.toolbar.needs_draw:
+        def get(self):
+            if fig.canvas.toolbar.needs_draw or self.last_buffer is None:
                 fig.canvas.draw()
                 fig.canvas.toolbar.needs_draw = False
-            renderer = fig.canvas.get_renderer()
-            buffer = np.array(
-                np.frombuffer(get_buffer(renderer), dtype=np.uint32),
-                copy=True)
-            buffer = buffer.reshape((renderer.height, renderer.width))
 
-            last_buffer = self.last_buffer
-            if last_buffer is not None:
-                diff = buffer != last_buffer
-                if not np.any(diff):
-                    print "Empty"
-                    output = np.zeros((1, 1))
+                renderer = fig.canvas.get_renderer()
+                buffer = np.array(
+                    np.frombuffer(get_buffer(renderer), dtype=np.uint32),
+                    copy=True)
+                buffer = buffer.reshape((renderer.height, renderer.width))
+
+                if self.last_buffer is not None:
+                    diff = buffer != self.last_buffer
+                    if not np.any(diff):
+                        output = np.zeros((1, 1))
+                    else:
+                        output = np.where(diff, buffer, 0)
                 else:
-                    print "Optimized"
-                    output = np.where(diff, buffer, 0)
-            else:
-                print "Full"
-                output = buffer
+                    output = buffer
 
-            png_buffer.reset()
-            png_buffer.truncate()
-            #global_timer()
-            _png.write_png(output.tostring(),
-                           output.shape[1], output.shape[0],
-                           png_buffer)
-            #print global_timer
-            self.write_message(png_buffer.getvalue(), binary=True)
-            self.last_buffer = buffer
+                self.png_buffer.reset()
+                self.png_buffer.truncate()
+                _png.write_png(output.tostring(),
+                               output.shape[1], output.shape[0],
+                               self.png_buffer)
+
+                self.last_buffer = buffer
+
+            return self.png_buffer.getvalue()
+
+    diff = DiffBuffer()
+
+    class Image(tornado.websocket.WebSocketHandler):
+        def open(self):
+            self.last_buffer = None
+            image_sockets.add(self)
+            self.init = True
+
+        def on_message(self, message):
+            diff.last_buffer = None
+            self.refresh()
+
+        def on_close(self):
+            self.init = False
+            image_sockets.remove(self)
+
+        def refresh(self):
+            if not self.init:
+                return
+
+            self.write_message(diff.get(), binary=True)
 
     class Event(tornado.websocket.WebSocketHandler):
         def open(self):
-            print "Opened Event connection"
+            self.pending = None
 
         def on_message(self, message):
-            global image_socket
             message = json.loads(message)
             type = message['type']
             if type != 'poll':
@@ -181,11 +157,19 @@ def serve_figure(fig, port=8888):
                     [fig.canvas.toolbar.message,
                      fig.canvas.toolbar.needs_draw]))
 
-            if fig.canvas.toolbar.needs_draw:
+            if fig.canvas.toolbar.needs_draw and self.pending is None:
+                ioloop = tornado.ioloop.IOLoop.instance()
+                self.pending = ioloop.add_timeout(
+                    datetime.timedelta(milliseconds=50),
+                    self.refresh_all)
+
+        def refresh_all(self):
+            for image_socket in image_sockets:
                 image_socket.refresh()
+            self.pending = None
 
         def on_close(self):
-            print "Event websocket closed"
+            pass
 
     application = tornado.web.Application([
         (r"/", IndexPage),
@@ -196,6 +180,7 @@ def serve_figure(fig, port=8888):
 
     application.listen(port)
     tornado.ioloop.IOLoop.instance().start()
+
 
 class Timer(object):
     def __init__(self, name="", reset=False):
@@ -215,4 +200,5 @@ class Timer(object):
     def __repr__(self):
         return str(self.name)+" %s ms"%(int(self()*1000))
 
-global_timer=Timer("Global timer", reset=True)
+
+global_timer = Timer("Global timer", reset=True)
