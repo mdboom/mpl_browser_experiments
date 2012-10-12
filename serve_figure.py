@@ -12,6 +12,7 @@ matplotlib.use('Agg')
 
 from matplotlib import _png
 from matplotlib import backend_bases
+from matplotlib.backends import backend_agg
 
 import cStringIO
 
@@ -44,15 +45,30 @@ class IndexPage(tornado.web.RequestHandler):
         self.write(html)
 
 
-image_sockets = set()
+class Timer(backend_bases.TimerBase):
+    def _timer_start(self):
+        self.timer = tornado.ioloop.PeriodicCallback(
+            self._on_timer,
+            self.interval)
+        self.timer.start()
+
+    def _timer_stop(self):
+        self.timer.stop()
+        self.timer = None
+
+
+backend_bases.TimerBase = Timer
+
 
 def serve_figure(fig, port=8888):
+    image_sockets = set()
+
     # The panning and zooming is handled by the toolbar, (strange enough),
     # so we need to create a dummy one.
     class Toolbar(backend_bases.NavigationToolbar2):
         def _init_toolbar(self):
             self.message = ''
-            self.needs_draw = True
+            self.pending = None
 
         def set_message(self, message):
             self.message = message
@@ -61,9 +77,30 @@ def serve_figure(fig, port=8888):
             self.cursor = cursor
 
         def dynamic_update(self):
-            self.needs_draw = True
+            if self.pending is None:
+                ioloop = tornado.ioloop.IOLoop.instance()
+                self.pending = ioloop.add_timeout(
+                    datetime.timedelta(milliseconds=50),
+                    self.update_callback)
+
+        def update_callback(self):
+            fig.canvas.draw()
+
+        def refresh_all(self):
+            diff.refresh()
+            for image_socket in image_sockets:
+                image_socket.refresh()
+            self.pending = None
 
     toolbar = Toolbar(fig.canvas)
+    toolbar.dynamic_update()
+
+    _draw = backend_agg.FigureCanvasAgg.draw
+    def draw(self):
+        _draw(self)
+        self.toolbar.refresh_all()
+    backend_agg.FigureCanvasAgg.draw = draw
+    backend_agg.FigureCanvasAgg.draw_idle = draw
 
     # Set pan mode -- it's the most interesting one
     toolbar.pan()
@@ -73,34 +110,31 @@ def serve_figure(fig, port=8888):
             self.last_buffer = None
             self.png_buffer = cStringIO.StringIO()
 
-        def get(self):
-            if fig.canvas.toolbar.needs_draw or self.last_buffer is None:
-                fig.canvas.draw()
-                fig.canvas.toolbar.needs_draw = False
+        def refresh(self):
+            renderer = fig.canvas.get_renderer()
+            buffer = np.array(
+                np.frombuffer(get_buffer(renderer), dtype=np.uint32),
+                copy=True)
+            buffer = buffer.reshape((renderer.height, renderer.width))
 
-                renderer = fig.canvas.get_renderer()
-                buffer = np.array(
-                    np.frombuffer(get_buffer(renderer), dtype=np.uint32),
-                    copy=True)
-                buffer = buffer.reshape((renderer.height, renderer.width))
-
-                if self.last_buffer is not None:
-                    diff = buffer != self.last_buffer
-                    if not np.any(diff):
-                        output = np.zeros((1, 1))
-                    else:
-                        output = np.where(diff, buffer, 0)
+            if self.last_buffer is not None:
+                diff = buffer != self.last_buffer
+                if not np.any(diff):
+                    output = np.zeros((1, 1))
                 else:
-                    output = buffer
+                    output = np.where(diff, buffer, 0)
+            else:
+                output = buffer
 
-                self.png_buffer.reset()
-                self.png_buffer.truncate()
-                _png.write_png(output.tostring(),
-                               output.shape[1], output.shape[0],
-                               self.png_buffer)
+            self.png_buffer.reset()
+            self.png_buffer.truncate()
+            _png.write_png(output.tostring(),
+                           output.shape[1], output.shape[0],
+                           self.png_buffer)
 
-                self.last_buffer = buffer
+            self.last_buffer = buffer
 
+        def get(self):
             return self.png_buffer.getvalue()
 
     diff = DiffBuffer()
@@ -113,6 +147,7 @@ def serve_figure(fig, port=8888):
 
         def on_message(self, message):
             diff.last_buffer = None
+            diff.refresh()
             self.refresh()
 
         def on_close(self):
@@ -153,23 +188,10 @@ def serve_figure(fig, port=8888):
                 elif type == 'motion_notify':
                     fig.canvas.motion_notify_event(x, y)
 
-            # The response is:
-            #   [message (str), needs_draw (bool) ]
             self.write_message(
                 json.dumps(
                     {'message': fig.canvas.toolbar.message,
                      'cursor': fig.canvas.toolbar.cursor}))
-
-            if fig.canvas.toolbar.needs_draw and self.pending is None:
-                ioloop = tornado.ioloop.IOLoop.instance()
-                self.pending = ioloop.add_timeout(
-                    datetime.timedelta(milliseconds=50),
-                    self.refresh_all)
-
-        def refresh_all(self):
-            for image_socket in image_sockets:
-                image_socket.refresh()
-            self.pending = None
 
         def on_close(self):
             pass
