@@ -57,6 +57,9 @@ def serve_figure(fig, port=8888):
         def set_message(self, message):
             self.message = message
 
+        def set_cursor(self, cursor):
+            self.cursor = cursor
+
         def dynamic_update(self):
             self.needs_draw = True
 
@@ -154,8 +157,8 @@ def serve_figure(fig, port=8888):
             #   [message (str), needs_draw (bool) ]
             self.write_message(
                 json.dumps(
-                    [fig.canvas.toolbar.message,
-                     fig.canvas.toolbar.needs_draw]))
+                    {'message': fig.canvas.toolbar.message,
+                     'cursor': fig.canvas.toolbar.cursor}))
 
             if fig.canvas.toolbar.needs_draw and self.pending is None:
                 ioloop = tornado.ioloop.IOLoop.instance()

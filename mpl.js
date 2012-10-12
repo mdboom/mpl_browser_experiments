@@ -4,11 +4,30 @@ window.onload = function() {
         return;
     }
     var message = document.getElementById("message");
+    var canvas = document.getElementById("canvas");
 
     control_ws = new WebSocket("ws://" + document.location.host + "/event");
     control_ws.onmessage = function (evt) {
         var msg = JSON.parse(evt.data);
-        message.textContent = msg[0];
+        message.textContent = msg['message'];
+
+        var cursor = msg['cursor']
+        switch(cursor)
+        {
+            case 0:
+                cursor = 'pointer';
+                break;
+            case 1:
+                cursor = 'default';
+                break;
+            case 2:
+                cursor = 'crosshair';
+                break;
+            case 3:
+                cursor = 'move';
+                break;
+        }
+        canvas.style.cursor = cursor;
     };
 
     var canvas = document.getElementById("myCanvas");
