@@ -1,3 +1,5 @@
+var control_ws;
+
 window.onload = function() {
     if (!("WebSocket" in window)) {
         alert("WebSocket not supported");

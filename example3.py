@@ -84,7 +84,7 @@ def animate(i):
     return line, time_text
 
 ani = animation.FuncAnimation(fig, animate, np.arange(1, len(y)),
-    interval=50, blit=False, init_func=init)
+    interval=25, blit=False, init_func=init)
 
 
 serve_figure.serve_figure(fig)
